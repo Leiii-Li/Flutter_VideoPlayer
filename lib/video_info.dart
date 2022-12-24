@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -20,6 +21,14 @@ class VideoInfoState extends State<VideoInfo> {
   List _info = [];
   bool _playAreaShowing = false;
   VideoPlayerController? _controller;
+  bool _isPlaying = false;
+  bool _disposed = false;
+  int _isPlayingIndex = -1;
+  bool _isMute = false;
+  String _currentPosition = "00:00";
+  double _progress = 0;
+  Duration? _duration;
+  Duration? _position;
 
   @override
   void initState() {
@@ -192,6 +201,7 @@ class VideoInfoState extends State<VideoInfo> {
                             children: [
                               InkWell(
                                 onTap: () {
+                                  _disposeController();
                                   setState(() {
                                     _playAreaShowing = false;
                                   });
@@ -212,6 +222,56 @@ class VideoInfoState extends State<VideoInfo> {
                           ),
                         ),
                         _playView(context),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 20,vertical: 8),
+                          child: SliderTheme(
+                              data: SliderTheme.of(context).copyWith(
+                                  activeTrackColor: Colors.red[700],
+                                  inactiveTrackColor: Colors.red[100],
+                                  trackShape: RoundedRectSliderTrackShape(),
+                                  trackHeight: 0.5,
+                                  thumbShape: RoundSliderThumbShape(
+                                      enabledThumbRadius: 8),
+                                  thumbColor: Colors.redAccent,
+                                  overlayColor: Colors.red.withAlpha(32),
+                                  overlayShape:
+                                      RoundSliderOverlayShape(overlayRadius: 8),
+                                  tickMarkShape: RoundSliderTickMarkShape(),
+                                  activeTickMarkColor: Colors.red[700],
+                                  inactiveTickMarkColor: Colors.red[100],
+                                  valueIndicatorShape:
+                                      PaddleSliderValueIndicatorShape(),
+                                  valueIndicatorColor: Colors.redAccent,
+                                  valueIndicatorTextStyle:
+                                      TextStyle(color: Colors.white)),
+                              child: Slider(
+                                value: max(0, min(_progress * 100, 100)),
+                                min: 0,
+                                max: 100,
+                                divisions: 100,
+                                onChanged: (value) {
+                                  setState(() {
+                                    _progress = value * 0.01;
+                                  });
+                                },
+                                onChangeStart: (value) {
+                                  _controller?.pause();
+                                },
+                                onChangeEnd: (value) {
+                                  final duration = _controller?.value.duration;
+                                  if (duration != null) {
+                                    var newValue = max(0, min(value, 99)) * 0.01;
+                                    var millis =
+                                        (duration.inMicroseconds * newValue)
+                                            .toInt();
+                                    _controller
+                                        ?.seekTo(Duration(microseconds: millis));
+                                    _controller?.play();
+                                  }
+                                },
+                              )),
+                        ),
+                        _controllerView(context)
                       ],
                     ),
                   ),
@@ -374,12 +434,61 @@ class VideoInfoState extends State<VideoInfo> {
     );
   }
 
+  var _onUpdateControllerTime = 0;
+
+  void _onControllerListener() async {
+    if (_disposed) {
+      return;
+    }
+    final now = DateTime.now().microsecondsSinceEpoch;
+    if ((now - _onUpdateControllerTime) < 1000) {
+      return;
+    }
+    _onUpdateControllerTime = now;
+
+    if (_controller == null) {
+      debugPrint("controller is null");
+      return;
+    }
+    if (_controller?.value.isInitialized == false) {
+      debugPrint("controller is not prepare");
+      return;
+    }
+    _position = await _controller?.value.position;
+
+    final duration = _duration?.inSeconds ?? 0;
+    final head = _position?.inSeconds ?? 0;
+    final remained = max(0, duration - head);
+    final mins = covertTwo(remained ~/ 60.0);
+    final sec = covertTwo((remained % 60.0).toInt());
+    debugPrint("$mins:$sec");
+
+    setState(() {
+      _isPlaying = _controller?.value.isPlaying ?? false;
+      _currentPosition = "$mins:$sec";
+      _progress = _position!.inMicroseconds.ceilToDouble() /
+          _duration!.inMicroseconds.ceilToDouble();
+    });
+  }
+
   void _onTapVideo(int index) {
+    _isPlayingIndex = index;
     String videoUrl = _info[index]["videoUrl"];
     debugPrint("VideoUrl $videoUrl");
+    final oldController = _controller;
     _controller = VideoPlayerController.network(videoUrl);
+    if (oldController != null) {
+      oldController.pause();
+      oldController.removeListener(_onControllerListener);
+    }
     _controller?.initialize().then((value) {
+      _isMute = (_controller?.value.volume == 0);
+      oldController?.dispose();
+      _controller?.addListener(_onControllerListener);
       _controller?.play();
+      _duration = _controller?.value.duration;
+      _position = _controller?.value.position;
+
       setState(() {});
     });
   }
@@ -395,6 +504,145 @@ class VideoInfoState extends State<VideoInfo> {
         aspectRatio: 16 / 9,
         child: Center(child: Text("Preparing...")),
       );
+    }
+  }
+
+  Widget _controllerView(BuildContext context) {
+    return Container(
+      height: 60,
+      width: MediaQuery.of(context).size.width,
+      color: AppColor.gradientSecond,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          InkWell(
+            onTap: () {
+              setState(() {
+                if (_isMute) {
+                  _controller?.setVolume(1.0);
+                  _isMute = false;
+                } else {
+                  _controller?.setVolume(0);
+                  _isMute = true;
+                }
+              });
+            },
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Container(
+                decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [
+                  BoxShadow(
+                      offset: Offset(0.0, 0.0),
+                      blurRadius: 4,
+                      color: Color.fromARGB(50, 0, 0, 0))
+                ]),
+                child: Icon(
+                  _isMute ? Icons.volume_off : Icons.volume_up,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+          InkWell(
+            onTap: () {
+              var targetIndex = _isPlayingIndex - 1;
+              if (targetIndex < 0 || _info.isEmpty) {
+                Get.snackbar("Video", "No more video to play",
+                    snackPosition: SnackPosition.BOTTOM,
+                    icon: Icon(
+                      Icons.face,
+                      size: 30,
+                      color: Colors.white,
+                    ),
+                    margin: EdgeInsets.only(bottom: 10));
+                return;
+              } else {
+                _onTapVideo(targetIndex);
+              }
+            },
+            child: Icon(
+              Icons.fast_rewind,
+              size: 36,
+              color: Colors.white,
+            ),
+          ),
+          SizedBox(
+            width: 20,
+          ),
+          InkWell(
+            onTap: () async {
+              setState(() {
+                if (_isPlaying == true) {
+                  _controller?.pause();
+                } else {
+                  _controller?.play();
+                }
+              });
+            },
+            child: Icon(
+              _isPlaying == true ? Icons.pause : Icons.play_arrow,
+              size: 36,
+              color: Colors.white,
+            ),
+          ),
+          SizedBox(
+            width: 20,
+          ),
+          InkWell(
+            onTap: () {
+              var targetIndex = _isPlayingIndex + 1;
+              if (targetIndex >= _info.length || _info.isEmpty) {
+                Get.snackbar("Video", "No more video to play",
+                    snackPosition: SnackPosition.BOTTOM,
+                    icon: Icon(
+                      Icons.face,
+                      size: 30,
+                      color: Colors.white,
+                    ),
+                    margin: EdgeInsets.only(bottom: 10));
+                return;
+              } else {
+                _onTapVideo(targetIndex);
+              }
+            },
+            child: Icon(
+              Icons.fast_forward,
+              size: 36,
+              color: Colors.white,
+            ),
+          ),
+          SizedBox(
+            width: 20,
+          ),
+          Text(
+            _currentPosition,
+            style: GoogleFonts.aBeeZee(
+                fontSize: 16,
+                color: AppColor.secondPageTitleColor.withOpacity(0.8)),
+          )
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _disposeController();
+    super.dispose();
+  }
+
+  _disposeController() {
+    _disposed = true;
+    _controller?.pause();
+    _controller?.dispose();
+    _controller = null;
+  }
+
+  String covertTwo(int value) {
+    if (value < 10) {
+      return "0$value";
+    } else {
+      return "$value";
     }
   }
 }
